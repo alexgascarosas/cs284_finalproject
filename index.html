@@ -76,7 +76,8 @@
 			font-weight: 600;
 		}
 
-		ul.tight li {
+		ul.tight li,
+		ol.tight li {
 			margin: 0.25rem 0;
 		}
 
@@ -89,11 +90,6 @@
 	<div class="container prose">
 		<h1>ActiveView: Hybrid View Selection for Efficient 3D Reconstruction</h1>
 		<p class="subtitle">CS184/284A Spring 2026 — Project Proposal</p>
-
-		<div class="meta-links">
-			<div>Link to webpage: (TODO) <a href="https://cs184.eecs.berkeley.edu/">cs184.eecs.berkeley.edu</a></div>
-			<div>Link to GitHub repository: (TODO) <a href="#">repository URL</a></div>
-		</div>
 
 		<h2>Summary</h2>
 		<p>
@@ -122,7 +118,15 @@
 		</p>
 		<p>
 			In this project, we investigate whether combining these complementary objectives can yield more efficient reconstruction.
-			Specifically, we model an iterative pipeline in which an agent: (1) acquires an observation from a selected viewpoint, (2) updates a partial 3D reconstruction, (3) evaluates candidate viewpoints based on a scoring function, and (4) selects the next viewpoint to maximize reconstruction improvement.
+			Specifically, we model an iterative pipeline in which an agent:
+		</p>
+		<ol class="tight">
+			<li>Acquires an observation from a selected viewpoint</li>
+			<li>Updates a partial 3D reconstruction</li>
+			<li>Evaluates candidate viewpoints based on a scoring function</li>
+			<li>Selects the next viewpoint to maximize reconstruction improvement</li>
+		</ol>
+		<p>
 			Our approach introduces a hybrid scoring function that balances exploration (coverage) and refinement (uncertainty), providing a principled yet computationally tractable alternative to learning-based NBV methods.
 		</p>
 
@@ -135,7 +139,7 @@
 			<li>Which components of the pipeline (rendering, fusion, scoring) dominate runtime, and where can we simplify without losing too much quality?</li>
 		</ul>
 
-		<h3>(1) Baseline plan — must deliver</h3>
+		<h3>(1) Primary scope: committed deliverables</h3>
 		<p>End-to-end loop: <strong>scene → image acquisition → reconstruction → view selection → iteration</strong>.</p>
 
 		<h4>Rendering and data generation</h4>
@@ -175,8 +179,10 @@
 			<li>Visualizations of camera trajectories and selected viewpoints</li>
 		</ul>
 
-		<h3>(2) Aspirational plan — hope to deliver</h3>
-		<p>If we move ahead of schedule, we hope to explore extensions inspired by neural radiance fields (NeRFs), more complex scenes or real-world datasets, and alternative uncertainty estimation strategies.</p>
+		<h3>(2) Extended scope: contingent objectives</h3>
+		<p>
+			Subject to available time and resources, we propose to pursue additional directions, including extensions inspired by neural radiance fields (NeRFs), evaluation on more complex scenes or real-world datasets, and alternative formulations of uncertainty estimation.
+		</p>
 
 		<h2>Schedule</h2>
 		<p>
