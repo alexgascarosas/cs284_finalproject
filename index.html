@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>ActiveView: Hybrid View Selection for Efficient 3D Reconstruction</title>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.4/MathJax.js?config=default"></script>
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+	<style>
+		h1 {
+			text-align: center;
+		}
+
+		.container {
+			margin: 0 auto;
+			padding: 60px 20%;
+		}
+
+		.prose {
+			max-width: 48rem;
+			margin-left: auto;
+			margin-right: auto;
+			line-height: 1.6;
+		}
+
+		h2 {
+			margin-top: 2.5rem;
+			margin-bottom: 0.75rem;
+		}
+
+		h3 {
+			margin-top: 1.5rem;
+			margin-bottom: 0.5rem;
+		}
+
+		figure {
+			text-align: center;
+		}
+
+		img {
+			display: inline-block;
+		}
+
+		body {
+			font-family: 'Inter', sans-serif;
+		}
+
+		.subtitle {
+			text-align: center;
+			margin-top: 0.5rem;
+			color: #444;
+		}
+
+		.meta-links {
+			text-align: center;
+			margin: 1.25rem 0;
+		}
+
+		table.schedule {
+			width: 100%;
+			border-collapse: collapse;
+			margin: 1rem 0;
+			font-size: 0.95rem;
+		}
+
+		table.schedule th,
+		table.schedule td {
+			border: 1px solid #ccc;
+			padding: 0.65rem 0.75rem;
+			vertical-align: top;
+			text-align: left;
+		}
+
+		table.schedule th {
+			background: #f5f5f5;
+			font-weight: 600;
+		}
+
+		ul.tight li {
+			margin: 0.25rem 0;
+		}
+
+		.ref-list li {
+			margin: 0.5rem 0;
+		}
+	</style>
+</head>
+<body>
+	<div class="container prose">
+		<h1>ActiveView: Hybrid View Selection for Efficient 3D Reconstruction</h1>
+		<p class="subtitle">CS184/284A Spring 2026 — Project Proposal</p>
+
+		<div class="meta-links">
+			<div>Link to webpage: (TODO) <a href="https://cs184.eecs.berkeley.edu/">cs184.eecs.berkeley.edu</a></div>
+			<div>Link to GitHub repository: (TODO) <a href="#">repository URL</a></div>
+		</div>
+
+		<h2>Summary</h2>
+		<p>
+			We propose a system for active view selection in 3D reconstruction, where an agent intelligently chooses camera viewpoints to improve reconstruction quality with fewer observations.
+			Instead of random sampling, we will combine coverage-based exploration and uncertainty-based refinement to guide the view selection process.
+			We will evaluate our approach against baseline methods to show improved reconstruction efficiency.
+		</p>
+
+		<h2>Team members</h2>
+		<ul class="tight">
+			<li>Alexander Gasca Rosas</li>
+			<li>Winfred Wang</li>
+			<li>Dennis Liang</li>
+			<li>Yousif Yacoby</li>
+		</ul>
+
+		<h2>Problem description</h2>
+		<p>
+			Multi-view 3D reconstruction is fundamentally dependent on the quality and diversity of input viewpoints.
+			Conventional pipelines assume either dense or randomly sampled observations, which can lead to redundant coverage of already-observed regions while failing to capture occluded or geometrically complex areas.
+			In practical settings such as robotics and embodied vision, observations are costly, and thus the problem of selecting informative viewpoints becomes critical.
+		</p>
+		<p>
+			This problem is commonly framed as a Next Best View (NBV) task, where the objective is to select the next camera pose that maximizes expected improvement in reconstruction quality.
+			However, existing approaches often emphasize a single criterion—either maximizing coverage of unseen regions or reducing uncertainty in poorly reconstructed areas.
+		</p>
+		<p>
+			In this project, we investigate whether combining these complementary objectives can yield more efficient reconstruction.
+			Specifically, we model an iterative pipeline in which an agent: (1) acquires an observation from a selected viewpoint, (2) updates a partial 3D reconstruction, (3) evaluates candidate viewpoints based on a scoring function, and (4) selects the next viewpoint to maximize reconstruction improvement.
+			Our approach introduces a hybrid scoring function that balances exploration (coverage) and refinement (uncertainty), providing a principled yet computationally tractable alternative to learning-based NBV methods.
+		</p>
+
+		<h2>Goals and deliverables</h2>
+
+		<h3>Research questions</h3>
+		<ul class="tight">
+			<li>Does a hybrid NBV criterion (coverage + uncertainty) improve reconstruction quality per observation compared to using either criterion alone?</li>
+			<li>How much more efficient is guided view selection than random viewpoint sampling, as a function of the number of views?</li>
+			<li>Which components of the pipeline (rendering, fusion, scoring) dominate runtime, and where can we simplify without losing too much quality?</li>
+		</ul>
+
+		<h3>(1) Baseline plan — must deliver</h3>
+		<p>End-to-end loop: <strong>scene → image acquisition → reconstruction → view selection → iteration</strong>.</p>
+
+		<h4>Rendering and data generation</h4>
+		<p>
+			We will simulate image acquisition from known camera poses using synthetic scenes.
+			This allows controlled evaluation of different view selection strategies.
+		</p>
+
+		<h4>3D reconstruction</h4>
+		<p>
+			We will implement a classical reconstruction pipeline (voxel-based or TSDF fusion) using tools such as Open3D.
+			Output will be a point cloud or mesh representation that is incrementally updated after each new view.
+		</p>
+
+		<h4>View selection strategies</h4>
+		<p>We will implement and compare the following:</p>
+		<ul class="tight">
+			<li>Random sampling (baseline)</li>
+			<li>Coverage-based selection (maximizing visibility of previously unseen regions)</li>
+			<li>Uncertainty-based selection (targeting poorly reconstructed regions)</li>
+			<li>Hybrid selection (ours — combining coverage and uncertainty)</li>
+		</ul>
+
+		<h4>Evaluation and metrics</h4>
+		<p>We will evaluate reconstruction quality as a function of the number of views. Metrics will include:</p>
+		<ol class="tight">
+			<li>Geometric accuracy (e.g. Chamfer distance to a reference shape when available)</li>
+			<li>Qualitative visual comparisons</li>
+			<li>Efficiency (quality improvement per observation)</li>
+		</ol>
+
+		<h4>Visuals and results</h4>
+		<p>We will produce:</p>
+		<ul class="tight">
+			<li>Progressive reconstructions over time</li>
+			<li>Side-by-side comparisons across methods</li>
+			<li>Visualizations of camera trajectories and selected viewpoints</li>
+		</ul>
+
+		<h3>(2) Aspirational plan — hope to deliver</h3>
+		<p>If we move ahead of schedule, we hope to explore extensions inspired by neural radiance fields (NeRFs), more complex scenes or real-world datasets, and alternative uncertainty estimation strategies.</p>
+
+		<h2>Schedule</h2>
+		<p>
+			Presentations are approximately four weeks after the proposal due date.
+			Below is a week-by-week plan with internal checkpoints aligned to our milestones.
+		</p>
+		<table class="schedule">
+			<thead>
+				<tr>
+					<th>Week / period</th>
+					<th>Key date</th>
+					<th>Due / focus</th>
+					<th>Tasks</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td>Week of Apr 7</td>
+					<td>Tue Apr 7, 2026</td>
+					<td><strong>Proposal due.</strong> References, environment, dataset/candidate views, metrics skeleton.</td>
+					<td>
+						<ul class="tight">
+							<li>All team members: find references, get familiar with the task</li>
+							<li>Set up pipeline</li>
+							<li>Collect dataset, define candidate views</li>
+							<li>Set up metrics + basic visualization</li>
+						</ul>
+					</td>
+				</tr>
+				<tr>
+					<td>Week of Apr 8–13</td>
+					<td>Mon Apr 13, 2026</td>
+					<td><strong>Internal milestone:</strong> working pipeline for baseline (random).</td>
+					<td>
+						<ul class="tight">
+							<li>Coverage-only method</li>
+							<li>Uncertainty-only method</li>
+							<li>Hybrid method (initial integration)</li>
+						</ul>
+					</td>
+				</tr>
+				<tr>
+					<td>Week of Apr 14–20</td>
+					<td>Mon Apr 20, 2026</td>
+					<td><strong>Graded milestone:</strong> milestone report, website, presentation; working pipeline for all methods.</td>
+					<td>
+						<ul class="tight">
+							<li>Evaluation: collect metrics, visuals, plots, comparisons</li>
+						</ul>
+					</td>
+				</tr>
+				<tr>
+					<td>Week of Apr 21–27</td>
+					<td>Mon Apr 27, 2026</td>
+					<td><strong>Internal milestone:</strong> all code-related work complete.</td>
+					<td>
+						<ul class="tight">
+							<li>Consolidate deliverables; polish experiments and figures</li>
+						</ul>
+					</td>
+				</tr>
+				<tr>
+					<td>Week of Apr 28 – May 4</td>
+					<td>Mon May 4, 2026</td>
+					<td><strong>Final deliverables:</strong> report, video, paper.</td>
+					<td>
+						<ul class="tight">
+							<li>Final write-up, video, and any remaining polish</li>
+						</ul>
+					</td>
+				</tr>
+				<tr>
+					<td>Final presentations</td>
+					<td>Tue May 5, 2026</td>
+					<td>Presentation.</td>
+					<td>Prepare and deliver final presentation.</td>
+				</tr>
+			</tbody>
+		</table>
+
+		<h2>Resources</h2>
+
+		<h3>References</h3>
+		<ul class="ref-list">
+			<li><a href="https://www.sciencedirect.com/science/article/pii/S2667393225000171" target="_blank" rel="noopener noreferrer">ScienceDirect — article S2667393225000171</a></li>
+			<li><a href="https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/2130_ECCV_2024_paper.php" target="_blank" rel="noopener noreferrer">ECCV 2024 paper (ECVA HTML index)</a></li>
+			<li><a href="https://arxiv.org/abs/2209.08546" target="_blank" rel="noopener noreferrer">arXiv:2209.08546</a></li>
+			<li><a href="https://arxiv.org/abs/2505.06219" target="_blank" rel="noopener noreferrer">arXiv:2505.06219</a></li>
+			<li><a href="https://arxiv.org/pdf/2508.00937v1" target="_blank" rel="noopener noreferrer">arXiv:2508.00937 (PDF)</a></li>
+			<li><a href="https://arxiv.org/abs/2407.20219" target="_blank" rel="noopener noreferrer">arXiv:2407.20219</a></li>
+			<li><a href="https://arxiv.org/abs/2111.03098" target="_blank" rel="noopener noreferrer">arXiv:2111.03098</a></li>
+		</ul>
+
+		<h3>Computing platform and software</h3>
+		<ul class="tight">
+			<li><strong>Hardware:</strong> Team laptops and any available GPUs (each member supports their own machine).</li>
+			<li><strong>OS:</strong> Windows, Linux, or macOS as available per member.</li>
+			<li><strong>Software:</strong> Python; Open3D (or similar) for TSDF/voxel fusion and geometry utilities; synthetic rendering via Blender, a custom OpenGL-style renderer, or another tool we standardize on for RGB/depth from known poses.</li>
+		</ul>
+
+		<h3>Starting codebase</h3>
+		<p>
+			We are starting from scratch for the active-view loop and experiments; utilities may borrow from public tutorials or small Open3D examples.
+			The canonical code repository will be the GitHub link in the header once it is finalized.
+		</p>
+	</div>
+</body>
+</html>
