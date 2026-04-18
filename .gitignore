@@ -6,3 +6,109 @@ venv/
 output/
 data/
 .DS_Store
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# mypy / type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.ruff_cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs and local scratch
+*.log
+logs/
+tmp/
+temp/
+scratch/
+
+# ML / experiment artifacts (adjust if you want some tracked)
+wandb/
+mlruns/
+lightning_logs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Large data (keep samples in repo if needed; ignore bulk)
+data/raw/
+data/processed/
+data/meshes/*.ply
+data/shapenet/*
+!data/shapenet/.gitkeep
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Blender / renders (uncomment if outputs should stay local)
+# renders/
+# *.blend1
