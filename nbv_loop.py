@@ -1,13 +1,4 @@
-"""Next-best-view loop (milestone-stable fallback).
-
-This version avoids unstable Open3D TSDF / depth integration on Windows by
-reconstructing a fused point cloud from the union of visible GT surface samples.
-
-That is enough for milestone experiments:
-- random / coverage / uncertainty / hybrid view selection
-- progressive reconstruction
-- Chamfer-vs-step metrics
-- saved point clouds and camera trajectories
+"""Next-best-view loop
 """
 
 from __future__ import annotations
