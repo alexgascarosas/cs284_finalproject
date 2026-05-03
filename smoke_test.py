@@ -5,6 +5,7 @@ extracts a mesh, and reports Chamfer distance vs. the original.
 """
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -58,8 +59,17 @@ def load_demo_mesh() -> o3d.geometry.TriangleMesh:
     )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="End-to-end TSDF smoke test.")
+    parser.add_argument("--out-dir", type=str, default="output")
+    parser.add_argument("--radius", type=float, default=2.2)
+    parser.add_argument("--views", type=int, default=12)
+    return parser.parse_args()
+
+
 def main() -> None:
-    out_dir = Path("output")
+    args = parse_args()
+    out_dir = Path(args.out_dir)
     out_dir.mkdir(exist_ok=True)
 
     print("loading demo mesh...")
@@ -69,8 +79,8 @@ def main() -> None:
 
     width, height = 320, 240
     intrinsic = make_intrinsic(width, height, fov_deg=55.0)
-    n_views = 12
-    radius = 1.8
+    n_views = args.views
+    radius = args.radius
 
     recon = Reconstructor(voxel_size=0.008, sdf_trunc=0.03, depth_max=4.0)
 

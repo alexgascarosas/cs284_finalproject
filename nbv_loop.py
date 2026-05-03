@@ -1,4 +1,16 @@
-"""Next-best-view loop
+"""Synthetic next-best-view experiments for active 3D reconstruction.
+
+Pipeline overview:
+1. Load and normalize a ground-truth mesh.
+2. Place candidate cameras on a sphere around the object.
+3. Render RGB-D for every candidate and precompute which GT samples are visible.
+4. Use a selection strategy to choose a subset of views over time.
+5. Fuse the chosen views into a TSDF reconstruction.
+6. Save checkpoint meshes, final mesh, and per-step metrics for comparison.
+
+The key split in this file is:
+- coverage metrics are computed from visible GT surface samples,
+- geometry quality is computed from the TSDF-fused reconstruction mesh.
 """
 
 from __future__ import annotations
@@ -6,15 +18,25 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import open3d as o3d
 
-from render import look_at, make_intrinsic, render_view
+from recon import Reconstructor
+from render import (
+    inside_image_mask,
+    look_at,
+    make_intrinsic,
+    project_camera_points,
+    render_view,
+    world_to_camera,
+)
 
 
 def fibonacci_sphere(n: int, radius: float = 1.0) -> np.ndarray:
+    """Generate approximately uniform camera centers on a sphere."""
     pts = np.zeros((n, 3), dtype=np.float64)
     phi = np.pi * (3.0 - np.sqrt(5.0))
     for i in range(n):
@@ -26,6 +48,7 @@ def fibonacci_sphere(n: int, radius: float = 1.0) -> np.ndarray:
 
 
 def normalize_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
+    """Center and scale a mesh to roughly unit extent for stable tuning."""
     verts = np.asarray(mesh.vertices).copy()
     vmin = verts.min(axis=0)
     vmax = verts.max(axis=0)
@@ -38,6 +61,7 @@ def normalize_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh
 
 
 def chamfer(a_pcd: o3d.geometry.PointCloud, b_pcd: o3d.geometry.PointCloud) -> float:
+    """Symmetric Chamfer proxy used throughout the experiments."""
     d_ab = np.asarray(a_pcd.compute_point_cloud_distance(b_pcd))
     d_ba = np.asarray(b_pcd.compute_point_cloud_distance(a_pcd))
     return 0.5 * (float(d_ab.mean()) + float(d_ba.mean()))
@@ -72,6 +96,7 @@ def chamfer(a_pcd: o3d.geometry.PointCloud, b_pcd: o3d.geometry.PointCloud) -> f
 #     raise FileNotFoundError(f"Could not load mesh '{mesh_name}' from {mesh_path}")
 
 def load_demo_mesh(mesh_name: str = "torus"):
+    """Load one of the fallback meshes used for repeatable local experiments."""
     if mesh_name == "torus":
         print("  using procedural torus")
         return o3d.geometry.TriangleMesh.create_torus(
@@ -94,6 +119,7 @@ def load_demo_mesh(mesh_name: str = "torus"):
 
 
 def save_view_montage(tiles: list[np.ndarray], width: int, height: int, out_path: Path) -> None:
+    """Save side-by-side RGB/depth tiles for the selected camera sequence."""
     if not tiles:
         return
     cols = 4
@@ -107,16 +133,11 @@ def save_view_montage(tiles: list[np.ndarray], width: int, height: int, out_path
 
 
 def render_tile(rgb: np.ndarray, depth: np.ndarray) -> np.ndarray:
+    """Build one montage tile with RGB on the left and normalized depth on the right."""
     d_max = max(float(depth.max()), 1e-6)
     depth_vis = (np.clip(depth / d_max, 0.0, 1.0) * 255.0).astype(np.uint8)
     depth_vis_rgb = np.stack([depth_vis] * 3, axis=-1)
     return np.concatenate([rgb, depth_vis_rgb], axis=1)
-
-
-def world_to_camera(points_world: np.ndarray, extrinsic: np.ndarray) -> np.ndarray:
-    pts_h = np.concatenate([points_world, np.ones((len(points_world), 1), dtype=np.float64)], axis=1)
-    cam_h = (extrinsic @ pts_h.T).T
-    return cam_h[:, :3]
 
 
 def visible_sample_mask(
@@ -124,43 +145,50 @@ def visible_sample_mask(
     intrinsic: o3d.camera.PinholeCameraIntrinsic,
     extrinsic: np.ndarray,
     depth_map: np.ndarray,
-    z_tol: float = 0.01,
+    z_tol: float = 0.02,
+    patch_radius: int = 1,
 ) -> np.ndarray:
+    """Estimate which GT samples are visible in a rendered depth map.
+
+    A sample is considered visible when:
+    - it projects in front of the camera and inside the image,
+    - the local depth patch contains at least one valid rendered depth value,
+    - the sample lies no farther than `depth_tol` behind the nearest valid depth
+      in that patch.
+
+    This uses the same projection helpers as `render_view` so rendering and
+    visibility scoring share one camera convention.
+    """
     cam = world_to_camera(points_world, extrinsic)
     z = cam[:, 2]
-
-    K = np.asarray(intrinsic.intrinsic_matrix)
-    fx, fy = K[0, 0], K[1, 1]
-    cx, cy = K[0, 2], K[1, 2]
     width, height = intrinsic.width, intrinsic.height
 
-    valid = z > 1e-6
-    u = np.full(len(points_world), -1, dtype=np.int32)
-    v = np.full(len(points_world), -1, dtype=np.int32)
-
-    u_proj = np.round(fx * (cam[valid, 0] / z[valid]) + cx).astype(np.int32)
-    v_proj = np.round(fy * (cam[valid, 1] / z[valid]) + cy).astype(np.int32)
-
-    inside = (u_proj >= 0) & (u_proj < width) & (v_proj >= 0) & (v_proj < height)
-
-    idx_valid = np.where(valid)[0]
-    idx_inside = idx_valid[inside]
-    u[idx_inside] = u_proj[inside]
-    v[idx_inside] = v_proj[inside]
-
     mask = np.zeros(len(points_world), dtype=bool)
+    u, v, valid = project_camera_points(cam, intrinsic)
+    inside = valid & inside_image_mask(u, v, width, height)
+    idx_inside = np.flatnonzero(inside)
     if len(idx_inside) == 0:
         return mask
 
-    sampled_depth = depth_map[v[idx_inside], u[idx_inside]]
-    good_depth = sampled_depth > 0.0
-    z_match = np.abs(z[idx_inside] - sampled_depth) <= z_tol
-    mask[idx_inside] = good_depth & z_match
+    nearest_depth = np.zeros(len(idx_inside), dtype=np.float32)
+    for out_idx, point_idx in enumerate(idx_inside):
+        u0 = max(0, u[point_idx] - patch_radius)
+        u1 = min(width, u[point_idx] + patch_radius + 1)
+        v0 = max(0, v[point_idx] - patch_radius)
+        v1 = min(height, v[point_idx] + patch_radius + 1)
+        patch = depth_map[v0:v1, u0:u1]
+        valid_patch = patch[patch > 0.0]
+        if valid_patch.size > 0:
+            nearest_depth[out_idx] = float(valid_patch.min())
+
+    good_depth = nearest_depth > 0.0
+    mask[idx_inside] = good_depth & (z[idx_inside] <= nearest_depth + z_tol)
     return mask
 
 
 @dataclass
 class CandidateView:
+    """Cached render + visibility information for one candidate camera pose."""
     idx: int
     eye: np.ndarray
     extrinsic: np.ndarray
@@ -170,6 +198,7 @@ class CandidateView:
 
 
 class NBVSelector:
+    """Base interface for policies that choose the next unused candidate view."""
     def select(self, candidates: list[CandidateView], seen_counts: np.ndarray, unused: np.ndarray) -> int:
         raise NotImplementedError
 
@@ -185,6 +214,7 @@ class RandomSelector(NBVSelector):
 
 
 class CoverageSelector(NBVSelector):
+    """Prefer views that expose the most currently unseen GT samples."""
     def select(self, candidates: list[CandidateView], seen_counts: np.ndarray, unused: np.ndarray) -> int:
         best_idx = -1
         best_score = -np.inf
@@ -199,6 +229,7 @@ class CoverageSelector(NBVSelector):
 
 
 class UncertaintySelector(NBVSelector):
+    """Prefer views that revisit already-seen surface with low observation count."""
     def select(self, candidates: list[CandidateView], seen_counts: np.ndarray, unused: np.ndarray) -> int:
         best_idx = -1
         best_score = -np.inf
@@ -301,6 +332,11 @@ class HybridSelector(NBVSelector):
         return int(np.argmax(hybrid_score))
 """
 class HybridSelector(NBVSelector):
+    """Simple explore-then-refine baseline.
+
+    This is not yet a weighted hybrid. It uses coverage in the first half of the
+    budget and uncertainty in the second half.
+    """
     def __init__(self, total_steps: int):
         self.total_steps = total_steps
         self.coverage_selector = CoverageSelector()
@@ -323,6 +359,7 @@ class HybridSelector(NBVSelector):
         return self.uncertainty_selector.select(candidates, seen_counts, unused)
 
 def build_selector(strategy: str, rng: np.random.Generator, alpha: float, beta: float, total_steps: int) -> NBVSelector:
+    """Instantiate the requested view-selection policy."""
     if strategy == "random":
         return RandomSelector(rng)
     if strategy == "coverage":
@@ -339,13 +376,23 @@ def precompute_candidates(
     intrinsic: o3d.camera.PinholeCameraIntrinsic,
     candidate_eyes: np.ndarray,
     gt_samples: np.ndarray,
+    depth_tol: float,
+    patch_radius: int,
 ) -> list[CandidateView]:
+    """Render and cache every candidate view before the selection loop starts."""
     candidates: list[CandidateView] = []
     print(f"precomputing {len(candidate_eyes)} candidate views...", flush=True)
     for i, eye in enumerate(candidate_eyes):
         extrinsic = look_at(eye)
         rgb, depth = render_view(mesh, intrinsic, extrinsic)
-        vis = visible_sample_mask(gt_samples, intrinsic, extrinsic, depth)
+        vis = visible_sample_mask(
+            gt_samples,
+            intrinsic,
+            extrinsic,
+            depth,
+            z_tol=depth_tol,
+            patch_radius=patch_radius,
+        )
         candidates.append(
             CandidateView(
                 idx=i,
@@ -361,6 +408,7 @@ def precompute_candidates(
 
 
 def pointcloud_from_mask(points: np.ndarray, mask: np.ndarray, voxel_size: float = 0.008) -> o3d.geometry.PointCloud:
+    """Convert visible GT samples into a downsampled point cloud for coverage metrics."""
     pcd = o3d.geometry.PointCloud()
     if not np.any(mask):
         return pcd
@@ -370,18 +418,57 @@ def pointcloud_from_mask(points: np.ndarray, mask: np.ndarray, voxel_size: float
     return pcd
 
 
-def evaluate_recon_mask(
-    gt_samples: np.ndarray,
-    recon_mask: np.ndarray,
+def evaluate_mask_chamfer(
+    points_world: np.ndarray,
+    mask: np.ndarray,
     gt_mesh: o3d.geometry.TriangleMesh,
     n_points: int = 20000,
 ) -> tuple[float, int]:
-    recon_pcd = pointcloud_from_mask(gt_samples, recon_mask)
+    """Evaluate GT-sample coverage as a point-cloud Chamfer proxy."""
+    recon_pcd = pointcloud_from_mask(points_world, mask)
     if len(recon_pcd.points) == 0:
         return float("inf"), 0
     gt_pcd = gt_mesh.sample_points_uniformly(number_of_points=n_points)
     cd = chamfer(gt_pcd, recon_pcd)
     return cd, len(recon_pcd.points)
+
+
+def evaluate_mesh_chamfer(
+    recon_mesh: o3d.geometry.TriangleMesh,
+    gt_mesh: o3d.geometry.TriangleMesh,
+    n_points: int = 20000,
+) -> tuple[float, int, int]:
+    """Evaluate the actual TSDF reconstruction mesh against the GT mesh."""
+    if len(recon_mesh.vertices) == 0 or len(recon_mesh.triangles) == 0:
+        return float("inf"), 0, 0
+    gt_pcd = gt_mesh.sample_points_uniformly(number_of_points=n_points)
+    recon_pcd = recon_mesh.sample_points_uniformly(number_of_points=n_points)
+    return chamfer(gt_pcd, recon_pcd), len(recon_mesh.vertices), len(recon_mesh.triangles)
+
+
+def parse_save_steps(raw_steps: str, n_steps: int) -> list[int]:
+    """Parse a comma-separated checkpoint list and always include the final step."""
+    steps = set()
+    for token in raw_steps.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        step = int(token)
+        if step > 0:
+            steps.add(min(step, n_steps))
+    steps.add(n_steps)
+    return sorted(steps)
+
+
+def build_run_root(out_root: Path, mesh_name: str, run_name: str | None) -> Path:
+    """Create a unique run directory so artifacts do not overwrite each other."""
+    if run_name:
+        folder = run_name
+    else:
+        folder = f"{mesh_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_root = out_root / folder
+    run_root.mkdir(parents=True, exist_ok=False)
+    return run_root
 
 
 def run_experiment(
@@ -395,7 +482,16 @@ def run_experiment(
     rng: np.random.Generator,
     alpha: float,
     beta: float,
+    save_steps: list[int],
 ) -> None:
+    """Run one strategy end-to-end and write its artifacts.
+
+    Important outputs:
+    - `recon_step_XX.ply`: checkpoint TSDF meshes
+    - `recon.ply`: final TSDF mesh
+    - `views.png`: selected RGB/depth montage
+    - `metrics.csv`: coverage and geometry quality over time
+    """
     selector = build_selector(strategy, rng=rng, alpha=alpha, beta=beta, total_steps=n_steps)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -404,6 +500,7 @@ def run_experiment(
     seen_counts = np.zeros(len(gt_samples), dtype=np.int32)
     recon_mask = np.zeros(len(gt_samples), dtype=bool)
     unused = np.ones(len(candidates), dtype=bool)
+    recon = Reconstructor(voxel_size=0.008, sdf_trunc=0.03, depth_max=4.0)
 
     selected_extrinsics: list[np.ndarray] = []
     selected_tiles: list[np.ndarray] = []
@@ -418,16 +515,21 @@ def run_experiment(
         cand = candidates[idx]
         unused[idx] = False
 
+        # Coverage and geometry are tracked separately: visibility updates the
+        # sample-based metrics, while TSDF fusion updates the actual mesh.
+        recon.integrate(cand.rgb, cand.depth, intrinsic, cand.extrinsic)
         seen_counts[cand.visible_mask] += 1
         recon_mask |= cand.visible_mask
 
         selected_extrinsics.append(cand.extrinsic.copy())
         selected_tiles.append(render_tile(cand.rgb, cand.depth))
 
-        cd, n_pts = evaluate_recon_mask(gt_samples, recon_mask, mesh)
+        coverage_cd, n_pts = evaluate_mask_chamfer(gt_samples, recon_mask, mesh)
+        recon_mesh = recon.extract_mesh()
+        mesh_cd, mesh_verts, mesh_tris = evaluate_mesh_chamfer(recon_mesh, mesh)
         seen_frac = float(np.mean(recon_mask))
         avg_obs = float(np.mean(seen_counts[recon_mask])) if np.any(recon_mask) else 0.0
-        newly_seen = int(np.sum(cand.visible_mask & (~(recon_mask ^ cand.visible_mask))))
+        newly_seen = int(np.sum(cand.visible_mask & (seen_counts == 1)))
 
         metrics_rows.append(
             {
@@ -435,31 +537,33 @@ def run_experiment(
                 "candidate_idx": idx,
                 "seen_fraction": seen_frac,
                 "avg_observations_seen_surface": avg_obs,
-                "newly_seen_samples": int(np.sum(cand.visible_mask & (seen_counts == 1))),
-                "chamfer": cd,
+                "newly_seen_samples": newly_seen,
+                "coverage_chamfer": coverage_cd,
                 "recon_points": n_pts,
+                "mesh_chamfer": mesh_cd,
+                "mesh_vertices": mesh_verts,
+                "mesh_triangles": mesh_tris,
             }
         )
 
         print(
             f"  step {step + 1:>2}/{n_steps} "
             f"view={idx:>2} "
-            f"new={int(np.sum(cand.visible_mask & (seen_counts == 1))):>5} "
+            f"new={newly_seen:>5} "
             f"seen={seen_frac:.3f} "
-            f"cd={cd:.5f} "
+            f"mesh_cd={mesh_cd:.5f} "
             f"pts={n_pts:>6}",
             flush=True,
         )
 
-        if (step + 1) in {1, 3, 5, 10, n_steps}:
-            pcd_step = pointcloud_from_mask(gt_samples, recon_mask)
-            o3d.io.write_point_cloud(str(out_dir / f"recon_step_{step + 1:02d}.ply"), pcd_step)
+        if (step + 1) in save_steps and len(recon_mesh.vertices) > 0:
+            o3d.io.write_triangle_mesh(str(out_dir / f"recon_step_{step + 1:02d}.ply"), recon_mesh)
 
-    final_pcd = pointcloud_from_mask(gt_samples, recon_mask)
-    if len(final_pcd.points) == 0:
-        raise RuntimeError(f"{strategy}: reconstructed point cloud is empty")
+    final_mesh = recon.extract_mesh()
+    if len(final_mesh.vertices) == 0 or len(final_mesh.triangles) == 0:
+        raise RuntimeError(f"{strategy}: reconstructed mesh is empty")
 
-    o3d.io.write_point_cloud(str(out_dir / "recon.ply"), final_pcd)
+    o3d.io.write_triangle_mesh(str(out_dir / "recon.ply"), final_mesh)
     save_view_montage(selected_tiles, intrinsic.width, intrinsic.height, out_dir / "views.png")
 
     K = np.asarray(intrinsic.intrinsic_matrix)
@@ -483,32 +587,40 @@ def run_experiment(
                 "seen_fraction",
                 "avg_observations_seen_surface",
                 "newly_seen_samples",
-                "chamfer",
+                "coverage_chamfer",
                 "recon_points",
+                "mesh_chamfer",
+                "mesh_vertices",
+                "mesh_triangles",
             ],
         )
         writer.writeheader()
         writer.writerows(metrics_rows)
 
     print(f"\nfinished strategy={strategy}", flush=True)
-    print(f"  final chamfer: {metrics_rows[-1]['chamfer']:.5f}", flush=True)
+    print(f"  final mesh chamfer: {metrics_rows[-1]['mesh_chamfer']:.5f}", flush=True)
     print(f"  wrote {out_dir}", flush=True)
 
 
 def parse_args() -> argparse.Namespace:
+    """Command-line interface for local experiments and report generation."""
     parser = argparse.ArgumentParser(description="Run milestone next-best-view experiments.")
     parser.add_argument("--strategy", type=str, default="all", choices=["all", "random", "coverage", "uncertainty", "hybrid"])
     parser.add_argument("--steps", type=int, default=12)
     parser.add_argument("--num-candidates", type=int, default=40)
-    parser.add_argument("--radius", type=float, default=1.8)
+    parser.add_argument("--radius", type=float, default=2.2)
     parser.add_argument("--width", type=int, default=320)
     parser.add_argument("--height", type=int, default=240)
     parser.add_argument("--fov", type=float, default=55.0)
     parser.add_argument("--gt-samples", type=int, default=15000)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=0.5)
+    parser.add_argument("--depth-tol", type=float, default=0.02)
+    parser.add_argument("--visibility-patch-radius", type=int, default=1)
+    parser.add_argument("--save-steps", type=str, default="1,3,5,10")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--out-root", type=str, default="output_nbv")
+    parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument(
                             "--mesh",
                             type=str,
@@ -520,6 +632,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Build the experiment state, then run one or more selection strategies."""
     args = parse_args()
     rng = np.random.default_rng(args.seed)
 
@@ -541,12 +654,21 @@ def main() -> None:
     candidate_eyes = fibonacci_sphere(args.num_candidates, radius=args.radius)
 
     print("precomputing candidates...", flush=True)
-    candidates = precompute_candidates(mesh, intrinsic, candidate_eyes, gt_samples)
+    candidates = precompute_candidates(
+        mesh,
+        intrinsic,
+        candidate_eyes,
+        gt_samples,
+        depth_tol=args.depth_tol,
+        patch_radius=args.visibility_patch_radius,
+    )
 
     strategies = ["random", "coverage", "uncertainty", "hybrid"] if args.strategy == "all" else [args.strategy]
 
     out_root = Path(args.out_root)
     out_root.mkdir(exist_ok=True)
+    run_root = build_run_root(out_root, args.mesh, args.run_name)
+    save_steps = parse_save_steps(args.save_steps, min(args.steps, len(candidates)))
 
     for strategy in strategies:
         print(f"starting strategy {strategy}...", flush=True)
@@ -557,14 +679,15 @@ def main() -> None:
             candidates=candidates,
             gt_samples=gt_samples,
             n_steps=min(args.steps, len(candidates)),
-            out_dir=out_root / strategy,
+            out_dir=run_root / strategy,
             rng=rng,
             alpha=args.alpha,
             beta=args.beta,
+            save_steps=save_steps,
         )
 
     print("\ndone.", flush=True)
-    print(f"results saved under: {out_root}", flush=True)
+    print(f"results saved under: {run_root}", flush=True)
 
 
 if __name__ == "__main__":
