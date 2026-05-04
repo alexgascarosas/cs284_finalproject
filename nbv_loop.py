@@ -332,15 +332,65 @@ class HybridSelector(NBVSelector):
         return int(np.argmax(hybrid_score))
 """
 class HybridSelector(NBVSelector):
-    """Simple explore-then-refine baseline.
-
-    This is not yet a weighted hybrid. It uses coverage in the first half of the
-    budget and uncertainty in the second half.
     """
-    def __init__(self, total_steps: int):
+    Adaptive hybrid selector:
+
+    1. Coverage-adaptive weight annealing: the explore/refine balance responds to
+       actual seen_fraction, not just step number. If coverage is low, keep exploring
+       even late in the budget; if coverage saturates early, switch to refinement sooner.
+
+    2. Smooth normalized blending: coverage and uncertainty scores are independently
+       normalized then blended with adaptive weights, so neither dominates by scale.
+
+    3. Angular diversity bonus: views too close (in angle) to already-selected cameras
+       get a penalty, discouraging redundant near-duplicate viewpoints.
+    """
+
+    def __init__(
+        self,
+        total_steps: int,
+        coverage_target: float = 0.85,  
+        diversity_weight: float = 0.3,  
+        min_angle_deg: float = 20.0,     
+    ):
         self.total_steps = total_steps
-        self.coverage_selector = CoverageSelector()
-        self.uncertainty_selector = UncertaintySelector()
+        self.coverage_target = coverage_target
+        self.diversity_weight = diversity_weight
+        self.min_angle_rad = np.deg2rad(min_angle_deg)
+        self._selected_eyes: list[np.ndarray] = []  # track chosen camera positions
+
+    def _normalize(self, x: np.ndarray, unused: np.ndarray) -> np.ndarray:
+        out = np.full_like(x, 0.0)
+        valid = unused & np.isfinite(x)
+        if not np.any(valid):
+            return out
+        xv = x[valid]
+        xmin, xmax = xv.min(), xv.max()
+        if xmax > xmin:
+            out[valid] = (xv - xmin) / (xmax - xmin)
+        else:
+            out[valid] = 1.0 
+        return out
+
+    def _diversity_scores(self, candidates: list[CandidateView], unused: np.ndarray) -> np.ndarray:
+        """Angular diversity bonus: reward views far from all already-selected cameras."""
+        scores = np.ones(len(candidates), dtype=np.float64)
+        if not self._selected_eyes:
+            return scores
+
+        selected = np.stack(self._selected_eyes, axis=0)  # (S, 3)
+
+        for i, cand in enumerate(candidates):
+            if not unused[i]:
+                continue
+            eye_norm = cand.eye / (np.linalg.norm(cand.eye) + 1e-9)
+            sel_norms = selected / (np.linalg.norm(selected, axis=1, keepdims=True) + 1e-9)
+            cos_sims = sel_norms @ eye_norm
+            min_angle = float(np.arccos(np.clip(cos_sims.max(), -1.0, 1.0)))
+            if min_angle < self.min_angle_rad:
+                scores[i] = min_angle / self.min_angle_rad  # [0, 1]
+
+        return scores
 
     def select(
         self,
@@ -349,14 +399,44 @@ class HybridSelector(NBVSelector):
         unused: np.ndarray,
         step: int = 0,
     ) -> int:
-        switch_step = self.total_steps // 2
+        n = len(candidates)
+        coverage_scores = np.full(n, -np.inf)
+        uncertainty_scores = np.full(n, -np.inf)
 
-        # First half: explore (coverage)
-        if step < switch_step:
-            return self.coverage_selector.select(candidates, seen_counts, unused)
+        seen_fraction = float(np.mean(seen_counts > 0))
 
-        # Second half: refine (uncertainty)
-        return self.uncertainty_selector.select(candidates, seen_counts, unused)
+        for i, cand in enumerate(candidates):
+            if not unused[i]:
+                continue
+            vis = cand.visible_mask
+
+            # Coverage
+            coverage_scores[i] = float(np.sum(vis & (seen_counts == 0)))
+
+            # Uncertainty
+            refine_mask = vis & (seen_counts > 0)
+            new_mask = vis & (seen_counts == 0)
+            refine_score = float(np.sum(1.0 / (1.0 + seen_counts[refine_mask]))) if np.any(refine_mask) else 0.0
+            new_bonus = float(np.sum(new_mask)) * 0.1  # small weight so uncertainty stays primary
+            uncertainty_scores[i] = refine_score + new_bonus
+
+        # Normalize both score families independently
+        cov_norm = self._normalize(coverage_scores, unused)
+        unc_norm = self._normalize(uncertainty_scores, unused)
+
+        # Diversity bonus
+        diversity = self._diversity_scores(candidates, unused)
+
+        # Adaptive weight
+        w_explore = max(0.0, 1.0 - seen_fraction / self.coverage_target)
+        w_refine = 1.0 - w_explore
+
+        hybrid = (w_explore * cov_norm + w_refine * unc_norm) * diversity
+        hybrid[~unused] = -np.inf
+
+        chosen = int(np.argmax(hybrid))
+        self._selected_eyes.append(candidates[chosen].eye.copy())
+        return chosen
 
 def build_selector(strategy: str, rng: np.random.Generator, alpha: float, beta: float, total_steps: int) -> NBVSelector:
     """Instantiate the requested view-selection policy."""
@@ -367,7 +447,12 @@ def build_selector(strategy: str, rng: np.random.Generator, alpha: float, beta: 
     if strategy == "uncertainty":
         return UncertaintySelector()
     if strategy == "hybrid":
-        return HybridSelector(total_steps=total_steps)
+        return HybridSelector(
+            total_steps=total_steps,
+            coverage_target=0.85,
+            diversity_weight=0.3,
+            min_angle_deg=20.0,
+        )
     raise ValueError(f"unknown strategy: {strategy}")
 
 
