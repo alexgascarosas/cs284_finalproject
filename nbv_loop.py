@@ -204,6 +204,7 @@ class NBVSelector:
 
 
 class RandomSelector(NBVSelector):
+    """Unbiased baseline: choose any remaining candidate uniformly at random."""
     def __init__(self, rng: np.random.Generator):
         self.rng = rng
 
@@ -251,32 +252,31 @@ class UncertaintySelector(NBVSelector):
                 best_idx = i
         return best_idx
 
-"""
 class HybridSelector(NBVSelector):
-    def __init__(self, alpha: float = 0.3, beta: float = 3.0):
+    """Weighted exploration/refinement policy.
+
+    Coverage rewards newly visible GT surface samples, so it drives fast early
+    growth. Uncertainty rewards already-seen samples with low observation count,
+    so it adds redundant views that can improve fused geometry. The two score
+    families are normalized per step before weighting so raw sample-count scale
+    does not make either term dominate.
+    """
+    def __init__(self, total_steps: int, alpha: float = 1.0, beta: float = 0.5):
+        self.total_steps = total_steps
         self.alpha = alpha
         self.beta = beta
 
-    def select(self, candidates: list[CandidateView], seen_counts: np.ndarray, unused: np.ndarray) -> int:
-        best_idx = -1
-        best_score = -np.inf
-        for i, cand in enumerate(candidates):
-            if not unused[i]:
-                continue
-            vis = cand.visible_mask
-            coverage_gain = float(np.sum(vis & (seen_counts == 0)))
-            uncertainty_gain = np.sum((seen_counts[vis] > 0) * (1.0 / (seen_counts[vis] + 1)))
-            score = self.alpha * coverage_gain + self.beta * uncertainty_gain
-            if score > best_score:
-                best_score = score
-                best_idx = i
-        return best_idx
-"""
-"""
-class HybridSelector(NBVSelector):
-    def __init__(self, total_steps: int, explore_bias: float = 0.7):
-        self.total_steps = total_steps
-        self.explore_bias = explore_bias
+    @staticmethod
+    def _normalize(scores: np.ndarray) -> np.ndarray:
+        valid = np.isfinite(scores)
+        out = np.zeros_like(scores, dtype=np.float64)
+        if not np.any(valid):
+            return out
+        vals = scores[valid]
+        lo, hi = float(vals.min()), float(vals.max())
+        if hi > lo:
+            out[valid] = (vals - lo) / (hi - lo)
+        return out
 
     def select(
         self,
@@ -291,72 +291,25 @@ class HybridSelector(NBVSelector):
         for i, cand in enumerate(candidates):
             if not unused[i]:
                 continue
-
             vis = cand.visible_mask
-
-            # coverage: unseen points only
             coverage_scores[i] = float(np.sum(vis & (seen_counts == 0)))
 
-            # uncertainty: refine already-seen but low-confidence points
             refine_mask = vis & (seen_counts > 0)
             if np.any(refine_mask):
-                    uncertainty_scores[i] = float(
-                        np.sum(1.0 / (1.0 + seen_counts[refine_mask]))
-                    )
+                uncertainty_scores[i] = float(np.sum(1.0 / (1.0 + seen_counts[refine_mask])))
             else:
-                    uncertainty_scores[i] = 0.0
+                uncertainty_scores[i] = 0.0
 
-        # normalize each score family so one does not dominate by scale
-        def normalize(x: np.ndarray) -> np.ndarray:
-            valid = np.isfinite(x)
-            if not np.any(valid):
-                return np.zeros_like(x)
-            xv = x[valid]
-            xmin, xmax = xv.min(), xv.max()
-            out = np.zeros_like(x)
-            if xmax > xmin:
-                out[valid] = (xv - xmin) / (xmax - xmin)
-            return out
+        coverage_norm = self._normalize(coverage_scores)
+        uncertainty_norm = self._normalize(uncertainty_scores)
 
-        coverage_norm = normalize(coverage_scores)
-        uncertainty_norm = normalize(uncertainty_scores)
-
-        # anneal from exploration -> refinement over time
-        t = step / max(1, self.total_steps - 1)
-        w_cov = 1.5 * (1.0 - t)
-        w_unc = self.explore_bias + 1.5 * t
-
-        hybrid_score = w_cov * coverage_norm + w_unc * uncertainty_norm
+        progress = step / max(1, self.total_steps - 1)
+        coverage_weight = self.alpha * (1.0 - 0.6 * progress)
+        uncertainty_weight = self.beta * (0.4 + 0.6 * progress)
+        hybrid_score = coverage_weight * coverage_norm + uncertainty_weight * uncertainty_norm
         hybrid_score[~unused] = -np.inf
 
         return int(np.argmax(hybrid_score))
-"""
-class HybridSelector(NBVSelector):
-    """Simple explore-then-refine baseline.
-
-    This is not yet a weighted hybrid. It uses coverage in the first half of the
-    budget and uncertainty in the second half.
-    """
-    def __init__(self, total_steps: int):
-        self.total_steps = total_steps
-        self.coverage_selector = CoverageSelector()
-        self.uncertainty_selector = UncertaintySelector()
-
-    def select(
-        self,
-        candidates: list[CandidateView],
-        seen_counts: np.ndarray,
-        unused: np.ndarray,
-        step: int = 0,
-    ) -> int:
-        switch_step = self.total_steps // 2
-
-        # First half: explore (coverage)
-        if step < switch_step:
-            return self.coverage_selector.select(candidates, seen_counts, unused)
-
-        # Second half: refine (uncertainty)
-        return self.uncertainty_selector.select(candidates, seen_counts, unused)
 
 def build_selector(strategy: str, rng: np.random.Generator, alpha: float, beta: float, total_steps: int) -> NBVSelector:
     """Instantiate the requested view-selection policy."""
@@ -367,7 +320,7 @@ def build_selector(strategy: str, rng: np.random.Generator, alpha: float, beta: 
     if strategy == "uncertainty":
         return UncertaintySelector()
     if strategy == "hybrid":
-        return HybridSelector(total_steps=total_steps)
+        return HybridSelector(total_steps=total_steps, alpha=alpha, beta=beta)
     raise ValueError(f"unknown strategy: {strategy}")
 
 

@@ -120,12 +120,74 @@ python nbv_loop.py \
   --run-name armadillo_tuned
 ```
 
+Final experiment settings:
+
+```bash
+.venv/bin/python nbv_loop.py \
+  --strategy all \
+  --mesh bunny \
+  --steps 12 \
+  --num-candidates 40 \
+  --radius 2.2 \
+  --width 320 \
+  --height 240 \
+  --fov 55 \
+  --gt-samples 15000 \
+  --depth-tol 0.02 \
+  --visibility-patch-radius 1 \
+  --seed 7 \
+  --save-steps 1,3,5,10,12 \
+  --out-root output_nbv_final \
+  --run-name bunny_final
+```
+
+Repeat with:
+
+```bash
+.venv/bin/python nbv_loop.py \
+  --strategy all \
+  --mesh armadillo \
+  --steps 12 \
+  --num-candidates 40 \
+  --radius 2.2 \
+  --width 320 \
+  --height 240 \
+  --fov 55 \
+  --gt-samples 15000 \
+  --depth-tol 0.02 \
+  --visibility-patch-radius 1 \
+  --seed 7 \
+  --save-steps 1,3,5,10,12 \
+  --out-root output_nbv_final \
+  --run-name armadillo_final
+
+.venv/bin/python nbv_loop.py \
+  --strategy all \
+  --mesh dragon \
+  --steps 12 \
+  --num-candidates 40 \
+  --radius 2.2 \
+  --width 320 \
+  --height 240 \
+  --fov 55 \
+  --gt-samples 15000 \
+  --depth-tol 0.02 \
+  --visibility-patch-radius 1 \
+  --seed 7 \
+  --save-steps 1,3,5,10,12 \
+  --out-root output_nbv_final \
+  --run-name dragon_final
+```
+
+Final plots should compare `mesh_chamfer` and `seen_fraction` over steps for
+`random`, `coverage`, `uncertainty`, and `hybrid`.
+
 ### Strategies
 
 - `random` - baseline; picks an unused view uniformly at random.
 - `coverage` - prefers views that expose the most currently unseen GT samples.
 - `uncertainty` - prefers views that revisit already-seen surface with low observation count.
-- `hybrid` - current explore-then-refine baseline; uses coverage early and uncertainty later.
+- `hybrid` - weighted coverage + uncertainty policy; keeps exploring unseen surface while gradually increasing refinement weight.
 
 ### Output layout
 
