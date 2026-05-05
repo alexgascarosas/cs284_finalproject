@@ -252,6 +252,7 @@ class UncertaintySelector(NBVSelector):
                 best_idx = i
         return best_idx
 
+
 class HybridSelector(NBVSelector):
     """Weighted exploration/refinement policy.
 
@@ -311,6 +312,122 @@ class HybridSelector(NBVSelector):
 
         return int(np.argmax(hybrid_score))
 
+
+class AdaptiveHybridSelector(NBVSelector):
+    """Experimental hybrid from an alternate branch (preserved for comparison).
+
+    Contrast with `HybridSelector`:
+    - That class shifts explore/refine weights using only *time* (step / budget).
+    - This class shifts weights using *measured coverage* (`seen_fraction` vs
+      `coverage_target`), so slow-to-cover scenes keep exploring longer.
+    - This class is *stateful*: it remembers chosen camera positions and applies
+      an angular penalty so the next view is not a near-duplicate direction.
+
+    Score construction matches the idea in that branch: normalize coverage and
+    uncertainty gains over *unused* candidates, blend with adaptive weights,
+    then multiply by a diversity factor. ``diversity_weight`` interpolates
+    between ignoring diversity (1.0) and fully applying the angular factor.
+    """
+
+    def __init__(
+        self,
+        total_steps: int,
+        coverage_target: float = 0.85,
+        diversity_weight: float = 0.3,
+        min_angle_deg: float = 20.0,
+    ) -> None:
+        self.total_steps = total_steps  # reserved for parity with HybridSelector / future scheduling
+        self.coverage_target = max(float(coverage_target), 1e-6)
+        self.diversity_weight = float(np.clip(diversity_weight, 0.0, 1.0))
+        self.min_angle_rad = np.deg2rad(min_angle_deg)
+        self._selected_eyes: list[np.ndarray] = []
+
+    @staticmethod
+    def _normalize_scores(x: np.ndarray, unused: np.ndarray) -> np.ndarray:
+        """Min--max normalize values only where ``unused`` and finite (else 0)."""
+        out = np.zeros_like(x, dtype=np.float64)
+        valid = unused & np.isfinite(x)
+        if not np.any(valid):
+            return out
+        xv = x[valid]
+        xmin, xmax = float(xv.min()), float(xv.max())
+        if xmax > xmin:
+            out[valid] = (xv - xmin) / (xmax - xmin)
+        else:
+            out[valid] = 1.0
+        return out
+
+    def _angular_diversity_factor(
+        self, candidates: list[CandidateView], unused: np.ndarray
+    ) -> np.ndarray:
+        """Per-candidate multipliers in [0, 1]: 1 if direction is new, lower if too close to prior views."""
+        n = len(candidates)
+        factor = np.ones(n, dtype=np.float64)
+        if not self._selected_eyes:
+            return factor
+
+        selected = np.stack(self._selected_eyes, axis=0)
+        sel_norms = selected / (np.linalg.norm(selected, axis=1, keepdims=True) + 1e-9)
+
+        for i, cand in enumerate(candidates):
+            if not unused[i]:
+                continue
+            eye_norm = cand.eye / (np.linalg.norm(cand.eye) + 1e-9)
+            cos_sims = sel_norms @ eye_norm
+            min_angle = float(np.arccos(np.clip(float(cos_sims.max()), -1.0, 1.0)))
+            if min_angle < self.min_angle_rad:
+                factor[i] = min_angle / self.min_angle_rad
+
+        return factor
+
+    def select(
+        self,
+        candidates: list[CandidateView],
+        seen_counts: np.ndarray,
+        unused: np.ndarray,
+        step: int = 0,
+    ) -> int:
+        del step  # scheduling is coverage-driven, not step-driven
+        n = len(candidates)
+        coverage_scores = np.full(n, -np.inf, dtype=np.float64)
+        uncertainty_scores = np.full(n, -np.inf, dtype=np.float64)
+
+        seen_fraction = float(np.mean(seen_counts > 0))
+
+        for i, cand in enumerate(candidates):
+            if not unused[i]:
+                continue
+            vis = cand.visible_mask
+
+            coverage_scores[i] = float(np.sum(vis & (seen_counts == 0)))
+
+            refine_mask = vis & (seen_counts > 0)
+            new_mask = vis & (seen_counts == 0)
+            refine_score = (
+                float(np.sum(1.0 / (1.0 + seen_counts[refine_mask]))) if np.any(refine_mask) else 0.0
+            )
+            # Small bonus on still-unseen samples so the refine term is not pure repetition.
+            new_bonus = float(np.sum(new_mask)) * 0.1
+            uncertainty_scores[i] = refine_score + new_bonus
+
+        cov_norm = self._normalize_scores(coverage_scores, unused)
+        unc_norm = self._normalize_scores(uncertainty_scores, unused)
+
+        angular = self._angular_diversity_factor(candidates, unused)
+        # When diversity_weight is 0, angular term has no effect (multiply by 1).
+        diversity_mult = (1.0 - self.diversity_weight) + self.diversity_weight * angular
+
+        w_explore = max(0.0, 1.0 - seen_fraction / self.coverage_target)
+        w_refine = 1.0 - w_explore
+
+        hybrid = (w_explore * cov_norm + w_refine * unc_norm) * diversity_mult
+        hybrid[~unused] = -np.inf
+
+        chosen = int(np.argmax(hybrid))
+        self._selected_eyes.append(candidates[chosen].eye.copy())
+        return chosen
+
+
 def build_selector(strategy: str, rng: np.random.Generator, alpha: float, beta: float, total_steps: int) -> NBVSelector:
     """Instantiate the requested view-selection policy."""
     if strategy == "random":
@@ -321,6 +438,8 @@ def build_selector(strategy: str, rng: np.random.Generator, alpha: float, beta: 
         return UncertaintySelector()
     if strategy == "hybrid":
         return HybridSelector(total_steps=total_steps, alpha=alpha, beta=beta)
+    if strategy == "hybrid_adaptive":
+        return AdaptiveHybridSelector(total_steps=total_steps)
     raise ValueError(f"unknown strategy: {strategy}")
 
 
@@ -461,7 +580,7 @@ def run_experiment(
 
     print(f"\nrunning strategy={strategy} for {n_steps} steps...", flush=True)
     for step in range(n_steps):
-        if strategy == "hybrid":
+        if strategy in ("hybrid", "hybrid_adaptive"):
             idx = selector.select(candidates, seen_counts, unused, step=step)
         else:
             idx = selector.select(candidates, seen_counts, unused)
@@ -558,7 +677,13 @@ def run_experiment(
 def parse_args() -> argparse.Namespace:
     """Command-line interface for local experiments and report generation."""
     parser = argparse.ArgumentParser(description="Run milestone next-best-view experiments.")
-    parser.add_argument("--strategy", type=str, default="all", choices=["all", "random", "coverage", "uncertainty", "hybrid"])
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        default="all",
+        choices=["all", "random", "coverage", "uncertainty", "hybrid", "hybrid_adaptive"],
+        help="hybrid: time-weighted blend; hybrid_adaptive: coverage-target + angular diversity (see AdaptiveHybridSelector).",
+    )
     parser.add_argument("--steps", type=int, default=12)
     parser.add_argument("--num-candidates", type=int, default=40)
     parser.add_argument("--radius", type=float, default=2.2)
